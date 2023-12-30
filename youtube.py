@@ -284,6 +284,10 @@ if __name__ == '__main__':
             print_line('-', 25)
             chat_history.append(search_query_prompt(user_input))
             search_query = chat(chat_history, 'gpt-3.5-turbo-1106')
+            # Clean up the search query
+            search_query = search_query.replace('\n', ' ').replace('\t', ' ').replace('  ', ' ').strip()
+            # Remove quotes since they exclude results in google search
+            search_query = search_query.replace('"', '')
             # pop the last chat history
             chat_history.pop()
             print('SEARCH QUERY: ', search_query)
