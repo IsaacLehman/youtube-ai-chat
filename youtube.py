@@ -19,6 +19,7 @@ CLI Commands:
 # Import web scraping modules from ./modules/web_scrape.py
 from openai import OpenAI
 from bs4 import BeautifulSoup
+from youtube_transcript_api import YouTubeTranscriptApi
 import copy, os, urllib, requests, re
 
 
@@ -81,7 +82,7 @@ def get_youtube_search_results(query, num_results=10):
     """
     Returns a list of transcripts from the YouTube search results
     """
-    urls = google_search_youtube(query, num_results)
+    urls = google_search_youtube(query, num_results + 10) # Get 10 extra URLs in case some of them don't have transcripts
     
     video_ids = []
     for url in urls:
@@ -90,6 +91,9 @@ def get_youtube_search_results(query, num_results=10):
 
     transcriptObjs = [] # [{url, transcript}] an array of objects
     for video_id in video_ids:
+        if len(transcriptObjs) >= num_results:
+            break # Stop if we have enough transcripts
+
         try:
             transcript = YouTubeTranscriptApi.get_transcript(video_id) # https://github.com/jdepoix/youtube-transcript-api
         except Exception as e:
@@ -187,7 +191,6 @@ def print_chat_history(chat_history):
             for transcript_object in chat_msg['context']:
                 print('\t- YouTube URL: ', transcript_object['url'])
                 print('\t- YouTube Transcript: ', ' '.join([part['text'] for part in transcript_object['transcript']])[0:100] + '...')
-    print_line('=')
 
 
 def search_query_prompt(user_input):
@@ -232,17 +235,19 @@ if __name__ == '__main__':
     """
     running = True
     youtube_on = True
+    print('Welcome to the AI YouTube Chatbot!')
+    print_help()
     while running:
         print_line('=')
         # Get user input
-        user_input = input(f'You (h for help){"[Youtube On]" if youtube_on else "[Youtube Off]"}: ')
+        user_input = input(f'You {"[Youtube On]" if youtube_on else "[Youtube Off]"}: ')
         # Check if user wants to quit
         if user_input.lower() == 'quit' or user_input.lower() == 'q':
             print('Goodbye!')
             running = False
             break
         # Check if user wants to print help menu
-        elif user_input.lower() == 'help' or user_input.lower() == 'h':
+        elif user_input.lower() == 'help':
             print_help()
             continue
         # Check if user wants to show chat history
@@ -321,3 +326,4 @@ if __name__ == '__main__':
             'context': transcript_objects
         })
         print()
+    
