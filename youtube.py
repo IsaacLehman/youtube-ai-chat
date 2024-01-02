@@ -20,8 +20,8 @@ CLI Commands:
 from openai import OpenAI
 from bs4 import BeautifulSoup
 from youtube_transcript_api import YouTubeTranscriptApi
-import copy, os, urllib, requests, re
-
+import copy, os, urllib, requests, datetime
+import tiktoken
 
 # ==================================================================================================
 # Web Scraping Functions
@@ -53,64 +53,77 @@ def google_search_youtube(query, num_results=10):
     Returns a list of urls from the Google search results
     """
     # Create the Google search url and get the soup
-    encoded_query = urllib.parse.quote(query) + '+site:youtube.com'
-    url = f'https://google.com/search?q={encoded_query}&num={num_results}&gbv=1'
+    url = f'https://google.com/search?q={urllib.parse.quote(query)}+site:youtube.com&num={num_results}&gbv=1'
     soup = get_soup(url)
-    
-    # Extract URLs from search_results
-    urls = [link['href'] for link in soup('a') if link['href'].startswith('/url?q=')]
 
-    # Remove unnecessary parts of the URL
-    urls = [re.search(r'/url\?q=(.*)\&sa', url).group(1) for url in urls]
+    # Find all the search result links
+    result_links = [link for link in soup('a') if link['href'].startswith('/url?q=')]
 
-    # Filter out non-URLs
-    urls = [url for url in urls if url.startswith('https')]
+    # Initialize an empty list to hold the results
+    results = []
 
-    # Filter out non youtube videos
-    urls = [url for url in urls if 'youtube.com/watch' in url]
+    # Loop through the result divs
+    for link in result_links:
+        # Find the link and title within each link
+        url = link['href']
+        title = link.parent.parent.find('h3')
+        if title:
+            title = title.text.strip()
+        else:
+            title = ""
 
-    # Decode the URL
-    urls = [urllib.parse.unquote(url) for url in urls]
+        # Skip if the link is not a YouTube video
+        if 'youtube.com/watch' not in url:
+            continue
 
-    # Remove duplicate URLs
-    urls = list(dict.fromkeys(urls))
-    
-    return urls
+        # Clean up the link
+        url = url[url.index('=')+1:url.index('&')]
+        url = urllib.parse.unquote(url)
+
+        # Skip if the link is already in the results
+        if any([result['url'] == url for result in results]):
+            continue
+
+        # Add the link and title to the results list as a dictionary
+        results.append({'url': url, 'title': title})
+
+    return results
 
 
 def get_youtube_search_results(query, num_results=10):
     """
     Returns a list of transcripts from the YouTube search results
     """
-    urls = google_search_youtube(query, num_results + 10) # Get 10 extra URLs in case some of them don't have transcripts
-    
-    video_ids = []
-    for url in urls:
-        video_id = url.split('v=')[1]
-        video_ids.append(video_id)
+    videos = google_search_youtube(query, num_results + 10) # Get 10 extra URLs in case some of them don't have transcripts
 
-    transcriptObjs = [] # [{url, transcript}] an array of objects
-    for video_id in video_ids:
-        if len(transcriptObjs) >= num_results:
+    transcripts = [] # [{url, transcript}] an array of objects
+    for video in videos:
+        if len(transcripts) >= num_results:
             break # Stop if we have enough transcripts
 
         try:
+            video_id = video['url'].split('v=')[1]
             transcript = YouTubeTranscriptApi.get_transcript(video_id) # https://github.com/jdepoix/youtube-transcript-api
         except Exception as e:
             continue # Skip this video if there is no transcript
-        transcript = [{'text': t['text'].replace(u'\xa0', u' '), **t} for t in transcript] # Fix the non-breaking space
-        transcriptObjs.append({'url': f'https://www.youtube.com/watch?v={video_id}', 'transcript': transcript})
+        
+        transcripts.append({
+            'url': f'https://www.youtube.com/watch?v={video_id}', 
+            'title': video['title'],
+            'video_id': video_id, # This is the same as the video_id in the url
+            'transcript': [{'text': t['text'].replace(u'\xa0', u' ').replace('\n', ' '), **t} for t in transcript] # Fix the non-breaking space
+        })
 
-    return transcriptObjs
+    return transcripts
 
 
 # ==================================================================================================
 # AI Functions
 # ==================================================================================================
-OPEN_AI_API_KEY = '<YOUR API KEY HERE>'
+OPEN_AI_API_KEY = '<YOUR API KEY HERE>
 chat_history = [{
     'role': 'system',
-    'content': 'You are a helpful AI assistant who always responds in plain text and designed to be interacted with in a terminal. Sometimes you will be given youtube transcripts to provide context. Respond to the user as if you were a human.'
+    'content': f'You are a helpful AI assistant who always responds in plain text and designed to be interacted with in a terminal. Sometimes you will be given youtube transcripts to provide context. Respond to the user as if you were a human. Current Date: {datetime.datetime.now().strftime("%Y-%m-%d")}'
 }] # Global variable to store chat history
 
 client = OpenAI(
@@ -156,6 +169,21 @@ def chat(msgs, model='gpt-3.5-turbo-1106', stream=False):
 # ==================================================================================================
 # Helper Functions
 # ==================================================================================================
+def get_token_count(text):
+    """
+    Returns the number of tokens in the text using the GPT-4 tokenizer tiktoken
+    """
+    encoder = tiktoken.encoding_for_model("gpt-4")
+    return len(encoder.encode(text))
+
+
+def get_chat_history_token_count(chat_history):
+    """
+    Returns the number of tokens in the chat history using the GPT-4 tokenizer tiktoken
+    """
+    return sum([get_token_count(chat_msg['content']) for chat_msg in chat_history])
+
+
 def print_line(char='-', num=50):
     """
     Prints a line of characters
@@ -185,12 +213,22 @@ def print_chat_history(chat_history):
     print('CHAT HISTORY: ')
     for chat_msg in chat_history:
         print(chat_msg['role'].upper() + ': ' + chat_msg['content'])
+        # Print the context if there is any
         if 'context' in chat_msg and len(chat_msg['context']) > 0:
             print_line('-', 25)
-            print('\tCONTEXT: ')
+            print('CONTEXT: ')
             for transcript_object in chat_msg['context']:
                 print('\t- YouTube URL: ', transcript_object['url'])
-                print('\t- YouTube Transcript: ', ' '.join([part['text'] for part in transcript_object['transcript']])[0:100] + '...')
+                print('\t- Video Title: ', transcript_object['title'])
+                # Calculate video duration
+                start_time = transcript_object['transcript'][0]['start']
+                duration = transcript_object['transcript'][-1]['start'] + transcript_object['transcript'][-1]['duration'] - start_time
+                duration = round(duration, 2)  # Round to 2 decimal places
+                print('\t- Video Duration: ', duration, ' seconds', ' - ', duration / 60, ' minutes')
+                print('\t- Transcript Excerpt: ', ' '.join([part['text'] for part in transcript_object['transcript']])[0:250] + '...')
+                # if not the last transcript object, print a line
+                if transcript_object != chat_msg['context'][-1]:
+                    print_line('-', 15)
 
 
 def search_query_prompt(user_input):
@@ -203,7 +241,7 @@ def search_query_prompt(user_input):
             Please generate a concise natural language search query for the following user input which would be used to search google:
             {user_input}
 
-            Return only the natural language search query.
+            Do not include any intro or exit text, only return only the natural language search query.
             Search Query:
         """
     }
@@ -299,12 +337,14 @@ if __name__ == '__main__':
             # Temporarily add the contexts to the chat history
             print('CONTEXT(s): ')
             for transcript_object in transcript_objects:
-                print('- ', transcript_object['url'])
+                print('- ', transcript_object['url'] + ' - ' + transcript_object['title'])
                 temp_chat_history.append({
                     'role': 'assistant',
                     'content': f"""
                     CONTEXT
                     - YouTube URL: {transcript_object['url']}
+                    - Video Title: {transcript_object['title']}
+                    - Video Duration: {transcript_object['transcript'][-1]['start'] + transcript_object['transcript'][-1]['duration'] - transcript_object['transcript'][0]['start']} seconds
                     - YouTube Transcript:
                     {' '.join([part['text'] for part in transcript_object['transcript']])}
                     """
@@ -321,7 +361,7 @@ if __name__ == '__main__':
         # Get and print the AI response
         print_line('-', 25)
         print('AI: ', end='')
-        ai_response = chat(temp_chat_history, model, True)
+        ai_response = chat(temp_chat_history, model, True) 
 
         # Add AI response to chat history
         chat_history.append({
@@ -330,4 +370,6 @@ if __name__ == '__main__':
             'context': transcript_objects
         })
         print()
+        print_line('-', 5)
+        print(f'Used model: {model} - {get_chat_history_token_count(temp_chat_history)} tokens')
     
